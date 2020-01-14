@@ -1,0 +1,204 @@
+//-------------------------------------------------------------------------POŁĄCZENIE BLUETOOTH
+#define BLYNK_USE_DIRECT_CONNECT
+
+#include <SoftwareSerial.h>
+SoftwareSerial DebugSerial(30,31); // RX, TX
+
+#define BLYNK_PRINT DebugSerial
+#include <BlynkSimpleSerialBLE.h>
+
+char auth[] = "qNEEjpW41Xc_O0kxMF8GwRtaqQrz2f9r";
+//-------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------setup MPU
+#include <Wire.h>
+const int MPU = 0x68; // MPU6050 I2C address
+float AccX, AccY, AccZ;
+float AccAngleX;
+float AccErrorX;
+int c = 0;
+int Ustaw = 0;\
+int a0 = 0, a1 = 0;
+WidgetLED ledOK(V5);
+WidgetLED ledBAD(V6);
+//-------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------ODCZYT WARTOŚCI Z PRZYCISKU USTAWIAJĄCEGO OBECNĄ POZYCJĘ
+BLYNK_WRITE(V3) //Button Widget is writing to pin V3
+{
+  Ustaw = param.asInt(); 
+}
+//-------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------TERMINAL - TESTER CZY DZIALA POPRAWNIE
+// Attach virtual serial terminal to Virtual Pin V1
+WidgetTerminal terminal(V1);
+
+// You can send commands from Terminal to your hardware. Just use
+// the same Virtual Pin as your Terminal Widget
+BLYNK_WRITE(V1)
+{
+
+  // if you type "Marco" into Terminal Widget - it will respond: "Polo:"
+  if (String("Marco") == param.asStr()) {
+    terminal.println("You said: 'Marco'") ;
+    terminal.println("I said: 'Polo'") ;
+  } else {
+
+    // Send it back
+    terminal.print("You said:");
+    terminal.write(param.getBuffer(), param.getLength());
+    terminal.println();
+  }
+
+  // Ensure everything is sent
+  terminal.flush();
+}
+//-------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------TIMER
+BlynkTimer timer1;
+//-------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------OBLICZANIE BŁĘDU
+void calculate_IMU_error() {
+  // We can call this funtion in the setup section to calculate the accelerometer and gyro data error. From here we will get the error values used in the above equations printed on the Serial Monitor.
+  // Note that we should place the IMU flat in order to get the proper values, so that we then can the correct values
+  // Read accelerometer values 200 times
+  
+  while (c < 200) {
+    Wire.beginTransmission(MPU);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU, 6, true);
+    AccX = (Wire.read() << 8 | Wire.read()) / 16384.0 ;
+    AccY = (Wire.read() << 8 | Wire.read()) / 16384.0 ;
+    AccZ = (Wire.read() << 8 | Wire.read()) / 16384.0 ;
+    // Sum all readings
+    AccErrorX = AccErrorX + ((atan((AccY) / sqrt(pow((AccX), 2) + pow((AccZ), 2))) * 180 / PI));
+    c++;
+  }
+  
+  //Divide the sum by 200 to get the error value
+  AccErrorX = AccErrorX / 200;
+  c = 0;
+  
+  // Print the error values on the Serial Monitor
+  terminal.print("AccErrorX: ");
+  terminal.println(AccErrorX);
+}
+//-------------------------------------------------------------------------
+
+
+//-------------------------------------------------------------------------ODCZYT Z MPU
+void ReadAccData() {
+  // === Read acceleromter data === //
+
+  if (Ustaw == 1)
+  {
+    calculate_IMU_error();
+    Ustaw = 0;
+  }
+
+  
+  Wire.beginTransmission(MPU);
+  Wire.write(0x3B); // Start with register 0x3B (ACCEL_XOUT_H)
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU, 6, true); // Read 6 registers total, each axis value is stored in 2 registers
+  //For a range of +-2g, we need to divide the raw values by 16384, according to the datasheet
+  
+  AccX = (Wire.read() << 8 | Wire.read()) / 8192.0; // X-axis value
+  AccY = (Wire.read() << 8 | Wire.read()) / 8192.0; // Y-axis value
+  AccZ = (Wire.read() << 8 | Wire.read()) / 8192.0; // Z-axis value
+  
+  // Calculating Roll and Pitch from the accelerometer data
+  AccAngleX = (atan(AccY / sqrt(pow(AccX, 2) + pow(AccZ, 2))) * 180 / PI) - AccErrorX; // AccErrorX ~(0.58) See the calculate_IMU_error()custom function for more details
+  
+  // Print the values on the serial monitor  
+  terminal.print("Kąt = ");
+  terminal.println(AccAngleX);
+
+  Blynk.virtualWrite(V2, AccAngleX);
+  Blynk.virtualWrite(V4, AccAngleX);
+
+  if (AccAngleX < 1.5 && a0 > 1)
+  {
+    ledOK.on();
+    ledBAD.off();
+    Blynk.setProperty(V4, "color", "#23C48E");
+  }
+  
+  if (AccAngleX > 1.5 && a1 > 2)
+  {
+
+    ledOK.off();
+    ledBAD.on();
+    Blynk.setProperty(V4, "color", "#D3435C");
+  }
+
+  if (AccAngleX < 1.5)
+  {
+    a0++;
+    if (a0 > 2)
+    {
+      a0 = 2;
+      a1 = 0;
+    }
+  }
+
+    if (AccAngleX > 1.5)
+  {
+    a1++;
+    if (a1 > 3)
+    {
+      a1 = 3;
+      a0 = 0;
+    }
+  }
+  
+}
+//-------------------------------------------------------------------------
+
+void setup()
+{
+  //-------------------------------------------------------------------------BLUETOOTH
+  // Debug console
+  DebugSerial.begin(9600);
+
+  // Blynk will work through Serial
+  // 9600 is for HC-06. For HC-05 default speed is 38400
+  // Do not read or write this serial manually in your sketch
+  Serial.begin(9600);
+  Blynk.begin(Serial, auth);
+  //-------------------------------------------------------------------------
+
+  //-------------------------------------------------------------------------TEKST POWITALNY
+  // This will print Blynk Software version to the Terminal Widget when
+  // your hardware gets connected to Blynk Server
+  terminal.println(F("Blynk v" BLYNK_VERSION ": Device started"));
+  terminal.println(F("-------------"));
+  terminal.println(F("Korektor postawy został uruchomiony."));
+  terminal.flush();
+  //-------------------------------------------------------------------------
+
+  //-------------------------------------------------------------------------MPU W SETUPIE
+  Wire.begin();
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);  // PWR_MGMT_1 register
+  Wire.write(0);     // set to zero (wakes up the MPU-6050)
+  Wire.endTransmission(true);
+  terminal.println("-------------");
+  terminal.flush();
+  //-------------------------------------------------------------------------
+  
+  //-------------------------------------------------------------------------Setup Timera
+  timer1.setInterval(1000L, ReadAccData);
+  //-------------------------------------------------------------------------
+}
+
+void loop()
+{
+  Blynk.run();
+  timer1.run();
+}
+
